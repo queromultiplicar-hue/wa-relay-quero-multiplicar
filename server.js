@@ -1,6 +1,7 @@
 /**
  * Servidor de retransmissao do WhatsApp - Instituto Quero Multiplicar
- * Versao com log detalhado de erro de conexao para diagnostico.
+ * Versao com log detalhado de erro de conexao para diagnostico e
+ * com registro das mensagens recebidas (endpoint /messages).
  */
 
 const express = require("express");
@@ -35,6 +36,14 @@ let conectado = false;
 let numeroConectado = null;
 let iniciandoConexao = false;
 let tentativas = 0;
+
+// Buffer em memoria das mensagens recebidas do WhatsApp, para o sistema
+// buscar via GET /messages (poll). Cada mensagem ganha um "cursor"
+// numerico crescente, e o sistema informa o ultimo cursor que ja viu
+// no parametro "since" para so receber as mensagens novas.
+let mensagensRecebidas = [];
+let proximoCursor = 0;
+const MAX_MENSAGENS_BUFFER = 500;
 
 function normalizarTelefoneParaJid(telefone) {
     let digitos = String(telefone || "").replace(/\D/g, "");
@@ -82,7 +91,7 @@ async function iniciarConexaoWhatsapp() {
                                  tentativas = 0;
                                  numeroConectado = (sock.user && sock.user.id) ? sock.user.id.split(":")[0] : null;
                                  console.log("[WhatsApp] Conectado! Numero:", numeroConectado);
-                       }
+  }
 
                        if (connection === "close") {
                                  conectado = false;
@@ -107,7 +116,20 @@ async function iniciarConexaoWhatsapp() {
               messages.forEach((m) => {
                         if (m.key.fromMe) return;
                         const texto = m.message && (m.message.conversation || (m.message.extendedTextMessage && m.message.extendedTextMessage.text));
-                        if (texto) console.log("[WhatsApp] Mensagem recebida de", m.key.remoteJid, ":", texto);
+                        if (!texto) return;
+                        const numero = String(m.key.remoteJid || "").split("@")[0];
+                        proximoCursor++;
+                        mensagensRecebidas.push({
+                                    cursor: proximoCursor,
+                                    from: numero,
+                                    pushName: m.pushName || null,
+                                    text: texto,
+                                    timestamp: (m.messageTimestamp ? Number(m.messageTimestamp) * 1000 : Date.now())
+                        });
+                        if (mensagensRecebidas.length > MAX_MENSAGENS_BUFFER) {
+                                    mensagensRecebidas = mensagensRecebidas.slice(mensagensRecebidas.length - MAX_MENSAGENS_BUFFER);
+                        }
+                        console.log("[WhatsApp] Mensagem recebida de", numero, ":", texto);
               });
       });
 
@@ -137,24 +159,24 @@ app.get("/status", (req, res) => {
 app.get("/qr", async (req, res) => {
     if (conectado) {
           res.send(`<html><body style="font-family:sans-serif; text-align:center; padding:60px">
-                <h2>WhatsApp ja esta conectado</h2>
-                      <p>Numero conectado: <b>${numeroConectado || "-"}</b></p>
-                          </body></html>`);
+          <h2>WhatsApp ja esta conectado</h2>
+          <p>Numero conectado: <b>${numeroConectado || "-"}</b></p>
+          </body></html>`);
           return;
     }
     if (!ultimoQr) {
           res.send(`<html><head><meta http-equiv="refresh" content="3"></head><body style="font-family:sans-serif; text-align:center; padding:60px">
-                <h2>Gerando QR Code... (tentativa ${tentativas})</h2><p>Atualize a pagina em alguns segundos.</p>
-                    </body></html>`);
+          <h2>Gerando QR Code... (tentativa ${tentativas})</h2><p>Atualize a pagina em alguns segundos.</p>
+          </body></html>`);
           return;
     }
     const qrImg = await QRCode.toDataURL(ultimoQr);
     res.send(`<html><head><meta http-equiv="refresh" content="20"></head><body style="font-family:sans-serif; text-align:center; padding:40px">
-        <h2>Escaneie este QR Code com o WhatsApp do celular</h2>
-            <p style="color:#666">No celular: WhatsApp &gt; Configuracoes &gt; Aparelhos conectados &gt; Conectar um aparelho</p>
-                <img src="${qrImg}" style="width:280px; height:280px; border:1px solid #ddd; border-radius:12px; padding:10px" />
-                    <p style="color:#999; font-size:12px">Esta pagina atualiza sozinha a cada 20 segundos.</p>
-                      </body></html>`);
+    <h2>Escaneie este QR Code com o WhatsApp do celular</h2>
+    <p style="color:#666">No celular: WhatsApp &gt; Configuracoes &gt; Aparelhos conectados &gt; Conectar um aparelho</p>
+    <img src="${qrImg}" style="width:280px; height:280px; border:1px solid #ddd; border-radius:12px; padding:10px" />
+    <p style="color:#999; font-size:12px">Esta pagina atualiza sozinha a cada 20 segundos.</p>
+    </body></html>`);
 });
 
 function checarSegredo(req, res, next) {
@@ -184,6 +206,12 @@ app.post("/send", checarSegredo, async (req, res) => {
           console.error("Erro ao enviar mensagem:", err);
           res.status(500).json({ error: "Falha ao enviar a mensagem." });
     }
+});
+
+app.get("/messages", checarSegredo, (req, res) => {
+    const desde = Number(req.query.since) || 0;
+    const novas = mensagensRecebidas.filter((m) => m.cursor > desde);
+    res.json({ messages: novas, cursor: proximoCursor });
 });
 
 app.listen(PORT, () => {
