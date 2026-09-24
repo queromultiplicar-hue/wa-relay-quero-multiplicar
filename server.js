@@ -7,6 +7,8 @@ const express = require("express");
 const cors = require("cors");
 const QRCode = require("qrcode");
 const pino = require("pino");
+if (!global.crypto) { global.crypto = require("crypto").webcrypto; }
+
 const path = require("path");
 const {
   default: makeWASocket,
